@@ -1,17 +1,20 @@
+/*
+
+	2/11/13 - Fixed for Arduino 1.0. Changed wire.send and wire.receive to wire.write and wire.read. Also added arduino.h and removed wprogram.h
+
+	8/9/15 NeoCat - Reworked RDS to support getting Station Name and RadioText
+*/
+
 #include "Arduino.h"
-#include "SparkFunSi4703.h"
+#include "Si4703_Breakout.h"
 #include "Wire.h"
 
-Si4703_Breakout::Si4703_Breakout(int resetPin, int sdioPin, int sclkPin)
+Si4703_Breakout::Si4703_Breakout(int resetPin, int sdioPin, int sclkPin, int rdsiPin)
 {
   _resetPin = resetPin;
   _sdioPin = sdioPin;
   _sclkPin = sclkPin;
-}
-
-void Si4703_Breakout::powerOn()
-{
-    si4703_init();
+  _rdsiPin = rdsiPin;
 }
 
 void Si4703_Breakout::setChannel(int channel)
@@ -69,54 +72,71 @@ void Si4703_Breakout::setVolume(int volume)
   updateRegisters(); //Update
 }
 
-void Si4703_Breakout::readRDS(char* buffer, long timeout)
-{ 
-	long endTime = millis() + timeout;
-  boolean completed[] = {false, false, false, false};
-  int completedCount = 0;
-  while(completedCount < 4 && millis() < endTime) {
-	readRegisters();
-	if(si4703_registers[STATUSRSSI] & (1<<RDSR)){
-		// ls 2 bits of B determine the 4 letter pairs
-		// once we have a full set return
-		// if you get nothing after 20 readings return with empty string
-	  uint16_t b = si4703_registers[RDSB];
-	  int index = b & 0x03;
-	  if (! completed[index] && b < 500)
-	  {
-		completed[index] = true;
-		completedCount ++;
-	  	char Dh = (si4703_registers[RDSD] & 0xFF00) >> 8;
-      	char Dl = (si4703_registers[RDSD] & 0x00FF);
-		buffer[index * 2] = Dh;
-		buffer[index * 2 +1] = Dl;
-		// Serial.print(si4703_registers[RDSD]); Serial.print(" ");
-		// Serial.print(index);Serial.print(" ");
-		// Serial.write(Dh);
-		// Serial.write(Dl);
-		// Serial.println();
-      }
-      delay(40); //Wait for the RDS bit to clear
-	}
-	else {
-	  delay(30); //From AN230, using the polling method 40ms should be sufficient amount of time between checks
-	}
-  }
-	if (millis() >= endTime) {
-		buffer[0] ='\0';
-		return;
-	}
 
-  buffer[8] = '\0';
+void Si4703_Breakout::dumpRDS(Print& serial)
+{
+  serial.print(si4703_registers[RDSA], HEX); serial.print(" ");
+  serial.print(si4703_registers[RDSB], HEX); serial.print(" ");
+  serial.print(si4703_registers[RDSC], HEX); serial.print(" ");
+  serial.print(si4703_registers[RDSD], HEX); serial.print(" ");
+  serial.print((char)(si4703_registers[RDSD]>>8));
+  serial.println((char)(si4703_registers[RDSD]&0xff));
 }
 
+bool Si4703_Breakout::rdsAvailable()
+{
+  if (_rdsiPin >= 0 && digitalRead(_rdsiPin) == HIGH)
+    return false;
+  readRegisters();
+  if (!(si4703_registers[STATUSRSSI] & (1<<RDSR)))
+    return false;
+  byte index = si4703_registers[RDSB] & 0x0f;
+  byte type = si4703_registers[RDSB] >> 12;
+  byte group = (si4703_registers[RDSB] >> 11) & 1; // A:0 B:1
+  if (type == 0) { // 0A/0B : update PS (station name)
+    index &= 0x03;
+    psname_ready |= (1<<index);
+    psname[index*2] = si4703_registers[RDSD] >> 8;
+    psname[index*2 + 1] = si4703_registers[RDSD] & 0xff;
+    psname[8] = 0;
+  }
+  else if (type == 2) { // 2A/2B : update Radio Text
+    if (text_index == index || text_index + 1 == index) {
+      text_index = index;
+      text[index*4] = si4703_registers[RDSC] >> 8;
+      text[index*4+1] = si4703_registers[RDSC] & 0xff;
+      text[index*4+2] = si4703_registers[RDSD] >> 8;
+      text[index*4+3] = si4703_registers[RDSD] & 0xff;
+      for (int i = index*4; i < index*4+4; i++) {
+        if (text[i] == 0 || text[i] == 0x0d) {
+          text[i] = 0;
+          text[64] = 0;
+          text_index = 0xff;
+        }
+      }
+      if (index == 0xf) {
+        text[64] = 0;
+        for (int i = 63; i > 0 && text[i] == ' '; i++)
+          text[i] = 0;
+        text_index = 0xff;
+      }
+    } else {
+      text_index = 0;
+    }
+  }
+  else dumpRDS(Serial);
+end:
+  if (_rdsiPin >= 0)
+    while (digitalRead(_rdsiPin) == LOW); // avoid reading the interrupt again
+  return (psname_ready == 0xf || text_index == 0xff);
+}
 
 
 
 //To get the Si4703 inito 2-wire mode, SEN needs to be high and SDIO needs to be low after a reset
 //The breakout board has SEN pulled high, but also has SDIO pulled high. Therefore, after a normal power up
 //The Si4703 will be in an unknown state. RST must be controlled
-void Si4703_Breakout::si4703_init() 
+void Si4703_Breakout::si4703_init(bool de)
 {
   pinMode(_resetPin, OUTPUT);
   pinMode(_sdioPin, OUTPUT); //SDIO is connected to A4 for I2C
@@ -139,8 +159,13 @@ void Si4703_Breakout::si4703_init()
   si4703_registers[POWERCFG] = 0x4001; //Enable the IC
   //  si4703_registers[POWERCFG] |= (1<<SMUTE) | (1<<DMUTE); //Disable Mute, disable softmute
   si4703_registers[SYSCONFIG1] |= (1<<RDS); //Enable RDS
+  if (_rdsiPin >= 0) {
+    si4703_registers[SYSCONFIG1] |= (1<<RDSIEN); //Enable RDS Interrupt on GPIO2
+    si4703_registers[SYSCONFIG1] |= (1<<2); //Enable GPIO2 for RDS Interrupt
+  }
 
-  si4703_registers[SYSCONFIG1] |= (1<<DE); //50kHz Europe setup
+  if (de)
+    si4703_registers[SYSCONFIG1] |= (1<<DE); //Europe setup
   si4703_registers[SYSCONFIG2] |= (1<<SPACE0); //100kHz channel spacing for Europe
 
   si4703_registers[SYSCONFIG2] &= 0xFFF0; //Clear volume bits
@@ -198,6 +223,8 @@ byte Si4703_Breakout::updateRegisters() {
 //Returns the freq if it made it
 //Returns zero if failed
 int Si4703_Breakout::seek(byte seekDirection){
+  psname_ready = 0;
+  text_index = 0;
   readRegisters();
   //Set seek mode wrap bit
   si4703_registers[POWERCFG] |= (1<<SKMODE); //Allow wrap

@@ -1,4 +1,4 @@
-#include <SparkFunSi4703.h>
+#include <Si4703_Breakout.h>
 #include <Wire.h>
 
 int resetPin = 2;
@@ -8,7 +8,6 @@ int SCLK = A5;
 Si4703_Breakout radio(resetPin, SDIO, SCLK);
 int channel;
 int volume;
-char rdsBuffer[10];
 
 void setup()
 {
@@ -67,12 +66,17 @@ void loop()
       radio.setChannel(channel);
       displayInfo();
     }
-    else if (ch == 'r')
-    {
-      Serial.println("RDS listening");
-      radio.readRDS(rdsBuffer, 15000);
-      Serial.print("RDS heard:");
-      Serial.println(rdsBuffer);      
+  }
+  if (radio.rdsAvailable()) {
+    const char *psname = radio.getPSName();
+    if (psname) {
+      Serial.print("PSNAME: ");
+      Serial.println(psname);
+    }
+    const char *text = radio.getText();
+    if (text) {
+      Serial.print("TEXT: ");
+      Serial.println(text);
     }
   }
 }

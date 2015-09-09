@@ -1,4 +1,7 @@
 /* 
+
+2/11/13 Edited by Aaron Weiss @ SparkFun
+
 Library for Sparkfun Si4703 breakout board.
 Simon Monk. 2011-09-09
 
@@ -37,38 +40,49 @@ Seek up/down - done 1/25/11
 
 The Si4703 breakout does work with line out into a stereo or other amplifier. Be sure to test with different length 3.5mm
 cables. Too short of a cable may degrade reception.
+
+2/11/13 - Fixed for Arduino 1.0. Changed wire.send and wire.receive to wire.write and wire.read. Also added arduino.h and removed wprogram.h
+
+8/9/15 NeoCat - Reworked RDS to support getting Station Name and RadioText
 */
 
-#ifndef SparkFunSi4703_h
-#define SparkFunSi4703_h
+#ifndef Si4703_Breakout_h
+#define Si4703_Breakout_h
 
 #include "Arduino.h"
-
-
 
 class Si4703_Breakout
 {
   public:
-    Si4703_Breakout(int resetPin, int sdioPin, int sclkPin);
-    void powerOn();					// call in setup
+    Si4703_Breakout(int resetPin, int sdioPin, int sclkPin, int rdsiPin=-1);
+    void powerOn(bool de=false) {	// call in setup
+      si4703_init(de);
+    }
 	void setChannel(int channel);  	// 3 digit channel number
 	int seekUp(); 					// returns the tuned channel or 0
 	int seekDown(); 				
 	void setVolume(int volume); 	// 0 to 15
-	void readRDS(char* message, long timeout);	
-									// message should be at least 9 chars
-									// result will be null terminated
-									// timeout in milliseconds
+	bool rdsAvailable();		// should be called periodically
+	const char* getPSName() { if (psname_ready != 0xf) return NULL; psname_ready = 0; return psname; }
+	const char* getText() { if (text_index != 0xff) return NULL; text_index = 0; return text; }
+	void dumpRDS(Print &serial);
+	void readRegisters();	// Read registers to update rssi / stereo etc.
+	char rssi() { return si4703_registers[STATUSRSSI] & 0xff; }
+	bool stereo() { return !!(si4703_registers[STATUSRSSI] & (1<<STEREO)); }
   private:
     int  _resetPin;
 	int  _sdioPin;
 	int  _sclkPin;
-	void si4703_init();
-	void readRegisters();
+	int  _rdsiPin;
+	void si4703_init(bool de);
 	byte updateRegisters();
 	int seek(byte seekDirection);
 	int getChannel();
 	uint16_t si4703_registers[16]; //There are 16 registers, each 16 bits large
+	byte psname_ready;
+	byte text_index;
+	char psname[9];
+	char text[65];
 	static const uint16_t  FAIL = 0;
 	static const uint16_t  SUCCESS = 1;
 
@@ -102,8 +116,11 @@ class Si4703_Breakout
 	static const uint16_t  TUNE = 15;
 
 	//Register 0x04 - SYSCONFIG1
+	static const uint16_t  RDSIEN = 15;
 	static const uint16_t  RDS = 12;
 	static const uint16_t  DE = 11;
+	static const uint16_t  GPIO2 = 2;
+	static const uint16_t  GPIO1 = 0;
 
 	//Register 0x05 - SYSCONFIG2
 	static const uint16_t  SPACE1 = 5;
